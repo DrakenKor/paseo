@@ -3,6 +3,8 @@ import {
   Language,
   languageDataProp,
   StreamLanguage,
+  sublanguageProp,
+  type Sublanguage,
 } from "@codemirror/language";
 import { dart } from "@codemirror/legacy-modes/mode/clike";
 import { swift } from "@codemirror/legacy-modes/mode/swift";
@@ -33,15 +35,28 @@ const hashComments = { commentTokens: { line: "#" } };
 const cssComments = { commentTokens: { block: { open: "/*", close: "*/" } } };
 const markupComments = { commentTokens: { block: { open: "<!--", close: "-->" } } };
 
+// JSX children are text, so a `//` there renders on the page instead of commenting the line out.
+const jsxComments: Sublanguage = {
+  // The `{` opening a JSX escape sits on a child line too, so judge it by its escape.
+  test: (node) => (node.name === "{" && node.parent ? node.parent : node).name.startsWith("JSX"),
+  facet: defineLanguageFacet({ commentTokens: { block: { open: "{/*", close: "*/}" } } }),
+};
+
 function language(
   parser: LRParser | MarkdownParser,
   languageData: Parameters<typeof defineLanguageFacet>[0] = {},
+  sublanguages: Sublanguage[] = [],
 ): Language {
   const data = defineLanguageFacet(languageData);
   return new Language(
     data,
     parser.configure({
-      props: [languageDataProp.add((node) => (node.isTop ? data : undefined))],
+      props: [
+        languageDataProp.add((node) => (node.isTop ? data : undefined)),
+        sublanguageProp.add((node) =>
+          node.isTop && sublanguages.length ? sublanguages : undefined,
+        ),
+      ],
     }),
   );
 }
@@ -49,9 +64,9 @@ function language(
 const languagesByExtension: Record<string, Language> = {
   // JavaScript/TypeScript
   js: language(jsParser, cStyleComments),
-  jsx: language(jsParser.configure({ dialect: "jsx" }), cStyleComments),
+  jsx: language(jsParser.configure({ dialect: "jsx" }), cStyleComments, [jsxComments]),
   ts: language(jsParser.configure({ dialect: "ts" }), cStyleComments),
-  tsx: language(jsParser.configure({ dialect: "ts jsx" }), cStyleComments),
+  tsx: language(jsParser.configure({ dialect: "ts jsx" }), cStyleComments, [jsxComments]),
   mjs: language(jsParser, cStyleComments),
   cjs: language(jsParser, cStyleComments),
   // C / C++ / Objective-C

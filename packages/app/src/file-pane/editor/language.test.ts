@@ -15,8 +15,51 @@ test.each([
 ])("toggles the comment and restores the source in %s", (filename, doc, commented) => {
   const language = getLanguageForFile(filename);
   if (!language) throw new Error(`Missing language for ${filename}`);
-  let state = EditorState.create({ doc, extensions: [language] });
-  const target = {
+  const target = editorTarget(EditorState.create({ doc, extensions: [language] }));
+  expect(toggleComment(target)).toBe(true);
+  expect(target.state.doc.toString()).toBe(commented);
+  expect(toggleComment(target)).toBe(true);
+  expect(target.state.doc.toString()).toBe(doc);
+});
+
+const jsxView = [
+  "const view = (",
+  "  <div>",
+  "    text",
+  "    {value}",
+  "    <span />",
+  "    {items.map(() => {",
+  "      const item = 1;",
+  "    })}",
+  "  </div>",
+  ");",
+].join("\n");
+
+test.each([
+  ["view.jsx", "text", "{/* text */}"],
+  ["view.tsx", "text", "{/* text */}"],
+  ["view.tsx", "{value}", "{/* {value} */}"],
+  ["view.tsx", "<span />", "{/* <span /> */}"],
+  ["view.tsx", "const item = 1;", "// const item = 1;"],
+])("toggles %s line %s as %s", (filename, line, commented) => {
+  const language = getLanguageForFile(filename);
+  if (!language) throw new Error(`Missing language for ${filename}`);
+  const target = editorTarget(
+    EditorState.create({
+      doc: jsxView,
+      extensions: [language],
+      selection: { anchor: jsxView.indexOf(line) },
+    }),
+  );
+  expect(toggleComment(target)).toBe(true);
+  expect(target.state.doc.toString()).toBe(jsxView.replace(line, commented));
+  expect(toggleComment(target)).toBe(true);
+  expect(target.state.doc.toString()).toBe(jsxView);
+});
+
+function editorTarget(initial: EditorState) {
+  let state = initial;
+  return {
     get state() {
       return state;
     },
@@ -24,11 +67,7 @@ test.each([
       state = transaction.state;
     },
   };
-  expect(toggleComment(target)).toBe(true);
-  expect(state.doc.toString()).toBe(commented);
-  expect(toggleComment(target)).toBe(true);
-  expect(state.doc.toString()).toBe(doc);
-});
+}
 
 test("keeps JSON comment-free", () => {
   const language = getLanguageForFile("data.json");
