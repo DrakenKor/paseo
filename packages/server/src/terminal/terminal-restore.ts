@@ -17,7 +17,11 @@ export const MAX_TERMINAL_OUTPUT_FRAME_BYTES = 256 * 1024;
 export const MAX_CLIENT_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 const DEFAULT_VISIBLE_RESTORE_SCROLLBACK_LINES = 200;
-const MAX_VISIBLE_RESTORE_SCROLLBACK_LINES = 1000;
+// The retention every terminal had before `daemon.terminalScrollbackLines`. A
+// catch-up restore is resent as often as every MAX_TERMINAL_OUTPUT_FRAME_BYTES of
+// output and a legacy snapshot ships cells, so both stay at this size however
+// much the daemon retains.
+export const LEGACY_SCROLLBACK_LINES = 1000;
 
 export type TerminalRestoreOptions = NonNullable<SubscribeTerminalRequest["restore"]>;
 
@@ -34,6 +38,15 @@ export function resolveRestoreAfterOutputOverflow(
 ): TerminalRestoreOptions | undefined {
   if (restore?.mode === "live") {
     return { mode: "visible-snapshot" };
+  }
+  if (restore?.mode === "visible-snapshot") {
+    return {
+      ...restore,
+      scrollbackLines: Math.min(
+        resolveVisibleRestoreScrollbackLines(restore.scrollbackLines),
+        LEGACY_SCROLLBACK_LINES,
+      ),
+    };
   }
   return restore;
 }
@@ -78,5 +91,5 @@ function resolveVisibleRestoreScrollbackLines(value: number | undefined): number
   if (typeof value !== "number") {
     return DEFAULT_VISIBLE_RESTORE_SCROLLBACK_LINES;
   }
-  return Math.min(Math.max(0, value), MAX_VISIBLE_RESTORE_SCROLLBACK_LINES);
+  return Math.max(0, value);
 }
