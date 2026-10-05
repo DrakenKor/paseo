@@ -86,6 +86,17 @@ const OmpBashExecutionMessageSchema = z
     timestamp: z.number(),
   })
   .passthrough();
+// Roles Paseo does not render. They are listed so that a frame carrying one, such as
+// agent_end, still parses; every role in OMP's RPC AgentMessage must appear in the union.
+const OmpPythonExecutionMessageSchema = z
+  .object({ role: z.literal("pythonExecution") })
+  .passthrough();
+const OmpHookMessageSchema = z.object({ role: z.literal("hookMessage") }).passthrough();
+const OmpBranchSummaryMessageSchema = z.object({ role: z.literal("branchSummary") }).passthrough();
+const OmpCompactionSummaryMessageSchema = z
+  .object({ role: z.literal("compactionSummary") })
+  .passthrough();
+const OmpFileMentionMessageSchema = z.object({ role: z.literal("fileMention") }).passthrough();
 
 export const OmpAgentMessageSchema = z.discriminatedUnion("role", [
   OmpUserMessageSchema,
@@ -94,6 +105,11 @@ export const OmpAgentMessageSchema = z.discriminatedUnion("role", [
   OmpAssistantMessageSchema,
   OmpToolResultMessageSchema,
   OmpBashExecutionMessageSchema,
+  OmpPythonExecutionMessageSchema,
+  OmpHookMessageSchema,
+  OmpBranchSummaryMessageSchema,
+  OmpCompactionSummaryMessageSchema,
+  OmpFileMentionMessageSchema,
 ]);
 
 export const OmpModelThinkingSchema = z
