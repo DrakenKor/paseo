@@ -45,7 +45,7 @@ describe("terminal restore policy", () => {
         mode: "visible-snapshot",
         scrollbackLines: 10_000,
       }),
-    ).toEqual({ scrollbackLines: 1000 });
+    ).toEqual({ scrollbackLines: 10_000 });
   });
 
   test("promotes live restore to visible restore after output overflow", () => {
@@ -55,6 +55,12 @@ describe("terminal restore policy", () => {
     expect(resolveRestoreAfterOutputOverflow({ mode: "full-snapshot" })).toEqual({
       mode: "full-snapshot",
     });
+  });
+
+  test("keeps a catch-up restore at the legacy scrollback", () => {
+    expect(
+      resolveRestoreAfterOutputOverflow({ mode: "visible-snapshot", scrollbackLines: 10_000 }),
+    ).toEqual({ mode: "visible-snapshot", scrollbackLines: 1000 });
   });
 
   test("encodes restore snapshots as restore frames", () => {
