@@ -209,3 +209,25 @@ test.each([
   },
   10000,
 );
+
+test("selects v2 for an OpenCode v2 binary that answers --version after 7 s", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { OpenCodeRuntimeClient } = await import("./runtime-client.js");
+  const { createTestLogger } = await import("../../../../test-utils/test-logger.js");
+  const root = await mkdtemp(join(tmpdir(), "opencode-slow-version-"));
+  const script = join(root, "version.cjs");
+  await writeFile(script, 'setTimeout(() => console.log("opencode v2.0.22"), 7000)');
+  const client = new OpenCodeRuntimeClient(createTestLogger(), {
+    command: { mode: "replace", argv: [process.execPath, script] },
+  });
+  try {
+    expect((await client.listFeatures({ provider: "opencode", cwd: root }))[0]?.label).toBe(
+      "Auto-accept",
+    );
+  } finally {
+    await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 20_000);
