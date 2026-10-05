@@ -227,6 +227,41 @@ describe("OMP CLI runtime", () => {
     expect(eventTypes).toEqual(["notice"]);
   });
 
+  test("emits agent_end for a run that contains an OMP developer message", async () => {
+    const child = createOmpChild();
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+    const eventTypes: string[] = [];
+    session.onEvent((event) => eventTypes.push(event.type));
+
+    // OMP 18.5 injects a developer reminder mid-run when a tool call matches a rule.
+    const reminder = {
+      role: "developer",
+      content: [
+        { type: "text", text: '<system-reminder reason="rule_violation">…</system-reminder>' },
+      ],
+      attribution: "agent",
+      timestamp: 2,
+    };
+    child.stdout.write(`${JSON.stringify({ type: "message_end", message: reminder })}\n`);
+    child.stdout.write(
+      `${JSON.stringify({
+        type: "agent_end",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Write tiny.ts" }], timestamp: 1 },
+          reminder,
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Done" }],
+            stopReason: "stop",
+            timestamp: 3,
+          },
+        ],
+      })}\n`,
+    );
+
+    expect(eventTypes).toEqual(["message_end", "agent_end"]);
+  });
+
   test("lists commands through get_available_commands", async () => {
     const child = createOmpChild();
     const commandTypes: string[] = [];
