@@ -4,7 +4,6 @@ import { expectComposerVisible } from "../support/helpers/composer";
 import { expectAgentIdle } from "../support/helpers/agent-stream";
 import {
   openAttachmentMenu,
-  composerLocator,
   expectAttachmentSheetRowsOnTitleRail,
   openGithubPickerFromMenu,
   attachImageFromMenu,
@@ -19,6 +18,7 @@ import {
   expectAttachButtonDisabled,
   fillComposerDraft,
   dropFileOnComposer,
+  pasteClipboardIntoComposer,
   sendDraftToQueue,
   expectQueuedMessageButton,
   startRunningMockAgent,
@@ -54,35 +54,41 @@ const TEST_JSON = {
 };
 
 test.describe("Composer attachments", () => {
-  test("pastes copied document text instead of its image representation", async ({
+  test("pasting copied document text keeps the text and attaches its image", async ({
     page,
     context,
     withWorkspace,
   }) => {
-    const workspace = await withWorkspace({ prefix: "paste-document-text-" });
+    const workspace = await withWorkspace({ prefix: "paste-document-" });
     await workspace.navigateTo();
     await clickNewChat(page);
     await expectComposerVisible(page);
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-    const text = "Document text with 한글 and two lines.\nSecond line.";
-    await page.evaluate(
-      async ({ content, png }) => {
-        const response = await fetch(`data:image/png;base64,${png}`);
-        const image = await response.blob();
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "text/plain": new Blob([content], { type: "text/plain" }),
-            "text/html": new Blob([`<p>${content}</p>`], { type: "text/html" }),
-            "image/png": image,
-          }),
-        ]);
-      },
-      { content: text, png: MINIMAL_PNG.toString("base64") },
-    );
-    await composerLocator(page).click();
-    await page.keyboard.press("ControlOrMeta+v");
+    const text = "Copied paragraph with 한글.\nSecond line.";
+
+    await pasteClipboardIntoComposer(page, context, {
+      text,
+      html: "<p>Copied paragraph with 한글.</p><p>Second line.</p>",
+      png: MINIMAL_PNG,
+    });
+
     await expectComposerDraft(page, text);
-    await expect(page.getByTestId("composer-image-attachment-pill")).toHaveCount(0);
+    await expectAttachmentPill(page, "composer-image-attachment-pill");
+  });
+
+  test("pasting an image without text attaches it and leaves the draft empty", async ({
+    page,
+    context,
+    withWorkspace,
+  }) => {
+    const workspace = await withWorkspace({ prefix: "paste-image-" });
+    await workspace.navigateTo();
+    await clickNewChat(page);
+    await expectComposerVisible(page);
+
+    await pasteClipboardIntoComposer(page, context, { png: MINIMAL_PNG });
+
+    await expectAttachmentPill(page, "composer-image-attachment-pill");
+    await expectComposerDraft(page, "");
   });
 
   test("selected file shows a loading attachment until upload is acknowledged", async ({
