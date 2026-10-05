@@ -52,15 +52,16 @@ describe("terminal restore policy", () => {
     expect(resolveRestoreAfterOutputOverflow({ mode: "live" })).toEqual({
       mode: "visible-snapshot",
     });
-    expect(resolveRestoreAfterOutputOverflow({ mode: "full-snapshot" })).toEqual({
-      mode: "full-snapshot",
-    });
   });
 
   test("keeps a catch-up restore at the legacy scrollback", () => {
     expect(
       resolveRestoreAfterOutputOverflow({ mode: "visible-snapshot", scrollbackLines: 10_000 }),
     ).toEqual({ mode: "visible-snapshot", scrollbackLines: 1000 });
+    expect(resolveRestoreAfterOutputOverflow({ mode: "full-snapshot" })).toEqual({
+      mode: "visible-snapshot",
+      scrollbackLines: 1000,
+    });
   });
 
   test("encodes restore snapshots as restore frames", () => {

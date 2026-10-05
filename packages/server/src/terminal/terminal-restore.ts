@@ -36,19 +36,21 @@ export function resolveTerminalSubscriptionSnapshotMode(
 export function resolveRestoreAfterOutputOverflow(
   restore: TerminalRestoreOptions | undefined,
 ): TerminalRestoreOptions | undefined {
-  if (restore?.mode === "live") {
+  if (!restore) {
+    return restore;
+  }
+  if (restore.mode === "live") {
     return { mode: "visible-snapshot" };
   }
-  if (restore?.mode === "visible-snapshot") {
-    return {
-      ...restore,
-      scrollbackLines: Math.min(
-        resolveVisibleRestoreScrollbackLines(restore.scrollbackLines),
-        LEGACY_SCROLLBACK_LINES,
-      ),
-    };
-  }
-  return restore;
+  const requested =
+    restore.mode === "full-snapshot"
+      ? LEGACY_SCROLLBACK_LINES
+      : resolveVisibleRestoreScrollbackLines(restore.scrollbackLines);
+  return {
+    ...restore,
+    mode: "visible-snapshot",
+    scrollbackLines: Math.min(requested, LEGACY_SCROLLBACK_LINES),
+  };
 }
 
 export function resolveTerminalRestoreSnapshotOptions(
