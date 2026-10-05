@@ -132,6 +132,7 @@ export interface CreateTerminalOptions {
   activityEnv?: Record<string, string>;
   rows?: number;
   cols?: number;
+  scrollbackLines?: number;
   name?: string;
   title?: string;
   command?: string;
@@ -899,6 +900,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     activityEnv = {},
     rows = 24,
     cols = 80,
+    scrollbackLines = 1000,
     name = "Terminal",
     title: presetTitle,
     command,
@@ -939,7 +941,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
   const terminal = new Terminal({
     rows,
     cols,
-    scrollback: 1000,
+    scrollback: scrollbackLines,
     allowProposedApi: true,
   });
 
