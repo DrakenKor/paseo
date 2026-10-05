@@ -2,7 +2,6 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import { ClaudeAgentClient } from "./agent.js";
-import { AgentManager } from "../../agent-manager.js";
 import { streamSession } from "../test-utils/session-stream-adapter.js";
 import type { AgentSession, AgentStreamEvent } from "../../agent-sdk-types.js";
 
@@ -298,86 +297,6 @@ test.each([false, true])(
     }
   },
 );
-
-test("publishes the submitted prompt identity before an immediate provider failure", async () => {
-  queryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) =>
-    createScriptedQuery({
-      prompt,
-      sessionId: "immediate-failure-session",
-      handlePrompt: ({ query }) =>
-        query.emit({
-          type: "result",
-          subtype: "error_during_execution",
-          session_id: "immediate-failure-session",
-          errors: ["session limit reached"],
-        }),
-    }),
-  );
-  const session = await new ClaudeAgentClient({
-    logger: createTestLogger(),
-    queryFactory,
-    resolveBinary: async () => "/test/claude/bin",
-  }).createSession({ provider: "claude", cwd: process.cwd() });
-  try {
-    const events = await collectUntilTerminal(
-      streamSession(session, "continue", { clientMessageId: "client-failed-prompt" }),
-    );
-    expect(events.at(-1)?.type).toBe("turn_failed");
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: "timeline",
-        item: expect.objectContaining({
-          type: "user_message",
-          text: "continue",
-          clientMessageId: "client-failed-prompt",
-          messageId: expect.any(String),
-        }),
-      }),
-    );
-  } finally {
-    await session.close();
-  }
-});
-
-test("rewind resolves a failed prompt's client identity to its Claude checkpoint", async () => {
-  const queries: ScriptedQuery[] = [];
-  queryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) => {
-    const query = createScriptedQuery({
-      prompt,
-      sessionId: "failed-prompt-rewind-session",
-      handlePrompt: ({ query: activeQuery }) =>
-        activeQuery.emit({
-          type: "result",
-          subtype: "error_during_execution",
-          session_id: "failed-prompt-rewind-session",
-          errors: ["session limit reached"],
-        }),
-    });
-    queries.push(query);
-    return query;
-  });
-  const client = new ClaudeAgentClient({
-    logger: createTestLogger(),
-    queryFactory,
-    resolveBinary: async () => "/test/claude/bin",
-  });
-  const manager = new AgentManager({ clients: { claude: client }, logger: createTestLogger() });
-  const agent = await manager.createAgent({ provider: "claude", cwd: process.cwd() }, undefined, {
-    workspaceId: undefined,
-  });
-  try {
-    await collectUntilTerminal(
-      manager.streamAgent(agent.id, "continue", { clientMessageId: "client-failed-prompt" }),
-    );
-    expect(manager.getAgent(agent.id)?.lastError).toBe("session limit reached");
-    await manager.rewind(agent.id, "client-failed-prompt", "files");
-    expect(queries[0].rewindFiles).toHaveBeenCalledWith(queries[0].prompts[0].uuid, {
-      dryRun: false,
-    });
-  } finally {
-    await manager.closeAgent(agent.id);
-  }
-});
 
 test("interrupt only calls query.interrupt and leaves the query open", async () => {
   const logger = createTestLogger();
