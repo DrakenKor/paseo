@@ -22,7 +22,7 @@ import { parser as rustParser } from "@lezer/rust";
 import { parser as xmlParser } from "@lezer/xml";
 import { parser as yamlParser } from "@lezer/yaml";
 import { parser as elixirParser } from "lezer-elixir";
-import type { Parser } from "@lezer/common";
+import type { Parser, SyntaxNode } from "@lezer/common";
 import type { LRParser } from "@lezer/lr";
 import { csharpLanguage } from "./csharp/language.js";
 import { astroParser } from "./astro/parser.js";
@@ -35,12 +35,26 @@ const hashComments = { commentTokens: { line: "#" } };
 const cssComments = { commentTokens: { block: { open: "/*", close: "*/" } } };
 const markupComments = { commentTokens: { block: { open: "<!--", close: "-->" } } };
 
+const jsxChildComments = { commentTokens: { block: { open: "{/*", close: "*/}" } } };
+
 // JSX children are text, so a `//` there renders on the page instead of commenting the line out.
+// Attribute lines of a multi-line tag are not children and keep `//`.
 const jsxComments: Sublanguage = {
-  // The `{` opening a JSX escape sits on a child line too, so judge it by its escape.
-  test: (node) => (node.name === "{" && node.parent ? node.parent : node).name.startsWith("JSX"),
-  facet: defineLanguageFacet({ commentTokens: { block: { open: "{/*", close: "*/}" } } }),
+  test: isJsxChild,
+  facet: defineLanguageFacet(jsxChildComments),
 };
+
+// A line starts on a child as text, as the `{` of an escape, or as the `<` of a nested element.
+function isJsxChild(node: SyntaxNode): boolean {
+  return childAt(node)?.parent?.name === "JSXElement";
+}
+
+function childAt(node: SyntaxNode): SyntaxNode | null {
+  if (node.name === "JSXText") return node;
+  if (node.name === "{") return node.parent;
+  if (node.name === "JSXStartTag") return node.parent?.parent ?? null;
+  return null;
+}
 
 function language(
   parser: LRParser | MarkdownParser,
@@ -122,7 +136,7 @@ const languagesByExtension: Record<string, Language> = {
   exs: language(elixirParser, hashComments),
   // Markdown
   md: language(markdownParser, markupComments),
-  mdx: language(markdownParser, markupComments),
+  mdx: language(markdownParser, jsxChildComments),
 };
 
 export function getLanguageForFile(filename: string): Language | null {
