@@ -166,7 +166,8 @@ schedule_activation() {
 }
 
 daemon_started_at() {
-  "$RUNTIME_NODE" -e 'try { process.stdout.write(require(process.argv[1]).startedAt ?? "") } catch {}' \
+  "$RUNTIME_NODE" -e 'const fs = require("fs");
+    try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).startedAt ?? "") } catch {}' \
     "$PASEO_HOME_DIR/paseo.pid"
 }
 
