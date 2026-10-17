@@ -1,0 +1,16 @@
+# Personal-fork desktop build (see FORK.md). `paseo-fork deploy --desktop` ad-hoc signs the result.
+extends: ./electron-builder.yml
+mac:
+  identity: null
+  notarize: false
+  hardenedRuntime: false
+  extendInfo:
+    LSEnvironment:
+      # Chromium's Keychain-backed cookie key prompts for the login password whenever the ad-hoc
+      # signature changes, which blocks an unattended relaunch. Paseo stores nothing in it.
+      PASEO_ELECTRON_FLAGS: --use-mock-keychain
+# Update checks look at the fork's releases (none), so upstream releases never replace this build.
+publish:
+  provider: github
+  owner: DrakenKor
+  repo: paseo

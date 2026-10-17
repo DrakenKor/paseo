@@ -4,6 +4,8 @@ Paseo is a mobile app for monitoring and controlling your local AI coding agents
 
 **Supported agents:** Claude Code, Codex, GitHub Copilot, OpenCode, Pi, Antigravity, and Muse Code.
 
+**Personal fork:** this is the `personal` branch of DrakenKor/paseo, running as the live Paseo on this machine. Read [FORK.md](FORK.md) before building, deploying, or restarting anything; it overrides the daemon restart rules below.
+
 ## Repository map
 
 This is an npm workspace monorepo:

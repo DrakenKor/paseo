@@ -1,0 +1,485 @@
+#!/bin/bash
+# Personal-fork operations for Paseo on macOS: install, deploy, rollback, sync, status. See FORK.md.
+set -euo pipefail
+
+FORK_ROOT="${PASEO_FORK_ROOT:-$HOME/.paseo-fork}"
+PASEO_HOME_DIR="${PASEO_FORK_HOME:-$HOME/.paseo}"
+BRANCH="${PASEO_FORK_BRANCH:-personal}"
+FORK_REPO="${PASEO_FORK_REPO:-DrakenKor/paseo}"
+UPSTREAM_REPO="getpaseo/paseo"
+LABEL="sh.paseo.fork.daemon"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+RUNTIME_NODE="$FORK_ROOT/runtime/node"
+APP_PATH="/Applications/Paseo.app"
+DESKTOP_SETTINGS="$HOME/Library/Application Support/Paseo/desktop-settings.json"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+REPO="$(git -C "$(dirname "$SCRIPT_PATH")" rev-parse --show-toplevel)"
+GUI="gui/$(id -u)"
+DEPLOY_LOG="$FORK_ROOT/logs/deploy.log"
+LOCK="$FORK_ROOT/state/deploy.lock"
+BUILD_LOG=/dev/null
+APP_SOURCES="packages/app packages/protocol packages/client packages/highlight packages/plugin packages/expo-two-way-audio"
+
+mkdir -p "$FORK_ROOT/logs" "$FORK_ROOT/state"
+
+usage() {
+  cat <<EOF
+usage: paseo-fork <command>
+
+  install                      one-time machine setup (runtime, slots, launchd job, CLI shim)
+  deploy [--desktop] [--now] [--build-only] [ref]
+                               build ref (default: $BRANCH) into the idle slot, then switch the
+                               daemon to it after 15s (--now: immediately). Rolls back on a failed
+                               health check. --desktop also rebuilds and reinstalls Paseo.app.
+  switch [--now] [--desktop]   switch the daemon to the idle slot's last build (alias: rollback);
+                               --desktop also installs that slot's Paseo.app
+  sync                         rebase $BRANCH onto upstream main and push it to $FORK_REPO
+  status                       slots, launchd job, and recent deploy log
+EOF
+}
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$DEPLOY_LOG" >&2; }
+die() {
+  log "error: $*"
+  exit 1
+}
+
+slot_dir() { echo "$FORK_ROOT/slots/$1"; }
+active_slot() {
+  local target
+  target="$(readlink "$FORK_ROOT/current" 2>/dev/null)" || {
+    echo none
+    return
+  }
+  basename "$target"
+}
+other_slot() { if [ "$1" = a ]; then echo b; else echo a; fi; }
+desktop_app_path() { echo "$1/packages/desktop/release/mac-arm64/Paseo.app"; }
+cli_in() {
+  local dir="$1"
+  shift
+  "$RUNTIME_NODE" --disable-warning=DEP0040 "$dir/packages/cli/dist/index.js" "$@"
+}
+describe_built() {
+  local sha
+  sha="$(cat "$FORK_ROOT/state/$1.built" 2>/dev/null)" || {
+    echo "no build"
+    return
+  }
+  git -C "$REPO" log -1 --format='%h %s (%cr)' "$sha" 2>/dev/null || echo "$sha"
+}
+remote_for() {
+  git -C "$1" remote -v | awk -v repo="$2" '$2 ~ repo && $3 == "(fetch)" { print $1; exit }'
+}
+branch_checkout() {
+  git -C "$REPO" worktree list --porcelain |
+    awk -v ref="refs/heads/$BRANCH" '/^worktree / { path = substr($0, 10) } $0 == "branch " ref { print path; exit }'
+}
+
+take_lock() {
+  local holder
+  holder="$(cat "$LOCK" 2>/dev/null || true)"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    die "another deploy (pid $holder) is running"
+  fi
+  echo $$ >"$LOCK"
+}
+
+# Runs a build step, keeping full output in the slot's build log and surfacing its tail on failure.
+step() {
+  local label="$1"
+  shift
+  log "  $label"
+  if ! "$@" >>"$BUILD_LOG" 2>&1; then
+    tail -n 40 "$BUILD_LOG" >&2
+    die "$label failed (full log: $BUILD_LOG)"
+  fi
+}
+
+web_ui_enabled() {
+  "$RUNTIME_NODE" -e 'process.exit(require(process.argv[1]).features?.webUi?.enabled === true ? 0 : 1)' \
+    "$PASEO_HOME_DIR/config.json" 2>/dev/null
+}
+
+web_ui_stale() {
+  local name="$1" sha="$2" dir="$3" built
+  [ -f "$dir/packages/server/dist/server/web-ui/index.html" ] || return 0
+  built="$(cat "$FORK_ROOT/state/$name.webui" 2>/dev/null)" || return 0
+  git -C "$dir" cat-file -e "$built^{commit}" 2>/dev/null || return 0
+  # shellcheck disable=SC2086
+  ! git -C "$dir" diff --quiet "$built" "$sha" -- $APP_SOURCES
+}
+
+build_desktop() {
+  step "app dependencies" npm run build:app-deps:clean
+  step "desktop renderer" bash -c 'cd packages/app && PASEO_WEB_PLATFORM=electron npx expo export --platform web'
+  step "server (clean)" npm run build:server:clean
+  step "desktop main" npm run build:main --workspace=@getpaseo/desktop
+  rm -rf packages/desktop/release
+  step "package Paseo.app" bash -c 'cd packages/desktop && npx electron-builder --config electron-builder.fork.yml --dir --arm64'
+  step "ad-hoc sign" codesign --force --deep --sign - "$(desktop_app_path "$PWD")"
+}
+
+build_slot() {
+  local name="$1" sha="$2" desktop="$3" dir lock
+  dir="$(slot_dir "$name")"
+  [ -d "$dir" ] || die "slot $name is missing; run: paseo-fork install"
+  BUILD_LOG="$FORK_ROOT/logs/build-$name.log"
+  : >"$BUILD_LOG"
+  cd "$dir"
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    die "slot $name has tracked changes; inspect $dir before deploying"
+  fi
+  git checkout --quiet --detach "$sha"
+  rm -f "$FORK_ROOT/state/$name.built"
+  lock="$(shasum package-lock.json | cut -d' ' -f1)"
+  if [ "$(cat "$FORK_ROOT/state/$name.lock" 2>/dev/null || true)" != "$lock" ]; then
+    step "npm ci" npm ci --ignore-scripts --no-audit --no-fund
+    step "dependency patches" env PATH="$dir/node_modules/.bin:$PATH" node scripts/postinstall-patches.mjs
+    echo "$lock" >"$FORK_ROOT/state/$name.lock"
+  fi
+  step "protocol validators" npm run generate:validators --workspace=@getpaseo/protocol
+  if [ "$desktop" = 1 ]; then
+    build_desktop
+  else
+    step "server" npm run build:server
+  fi
+  if web_ui_enabled && web_ui_stale "$name" "$sha" "$dir"; then
+    step "audio module" npm run build --workspace=@getpaseo/expo-two-way-audio
+    step "web UI" npm run build:daemon-web-ui
+    echo "$sha" >"$FORK_ROOT/state/$name.webui"
+  fi
+  echo "$sha" >"$FORK_ROOT/state/$name.built"
+}
+
+# Starts the activation in a new session: it must outlive the agent process the restart ends.
+schedule_activation() {
+  local name="$1" delay="$2" desktop="$3"
+  local args=(activate "$name" "$delay")
+  if [ "$desktop" = 1 ]; then args+=(--desktop); fi
+  log "switching the daemon to slot $name in ${delay}s; follow with: tail -f $DEPLOY_LOG"
+  perl -MPOSIX -e 'exit if fork; POSIX::setsid(); exit if fork;
+    open STDIN, "<", "/dev/null"; open STDOUT, ">>", shift @ARGV; open STDERR, ">&STDOUT";
+    exec @ARGV or die "exec failed: $!"' "$FORK_ROOT/logs/activate.log" "$SCRIPT_PATH" "${args[@]}"
+}
+
+daemon_started_at() {
+  "$RUNTIME_NODE" -e 'try { process.stdout.write(require(process.argv[1]).startedAt ?? "") } catch {}' \
+    "$PASEO_HOME_DIR/paseo.pid"
+}
+
+stop_daemon() {
+  [ -f "$PASEO_HOME_DIR/paseo.pid" ] || return 0
+  cli_in "$1" daemon stop --home "$PASEO_HOME_DIR" --timeout 60 --json >>"$DEPLOY_LOG" 2>&1
+}
+
+# Healthy: a new supervisor whose worker answers status from the pinned runtime.
+HEALTH_JS='
+let input = "";
+process.stdin.on("data", (chunk) => (input += chunk)).on("end", () => {
+  const fs = require("fs");
+  const [previous, runtime] = process.argv.slice(1);
+  try {
+    const status = JSON.parse(input);
+    const ok = status.localDaemon === "running" && status.startedAt !== previous &&
+      Boolean(status.workerPid) && fs.realpathSync(status.daemonNode) === fs.realpathSync(runtime);
+    process.exit(ok ? 0 : 1);
+  } catch {
+    process.exit(1);
+  }
+});'
+
+wait_healthy() {
+  local dir="$1" previous="$2" attempt
+  for attempt in $(seq 1 45); do
+    sleep 2
+    if cli_in "$dir" daemon status --home "$PASEO_HOME_DIR" --json 2>/dev/null |
+      "$RUNTIME_NODE" -e "$HEALTH_JS" "$previous" "$RUNTIME_NODE"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+restart_daemon() {
+  local dir="$1" previous kick="kickstart"
+  previous="$(daemon_started_at)"
+  if [ -n "$previous" ] && ! stop_daemon "$dir"; then kick="kickstart -k"; fi
+  if launchctl print "$GUI/$LABEL" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    launchctl $kick "$GUI/$LABEL"
+  else
+    launchctl bootstrap "$GUI" "$PLIST"
+  fi
+  wait_healthy "$dir" "$previous"
+}
+
+quit_desktop() {
+  local pid attempt
+  pid="$(pgrep -x Paseo | head -n 1 || true)"
+  [ -n "$pid" ] || return 1
+  log "quitting Paseo Desktop (pid $pid)"
+  kill -TERM "$pid"
+  for attempt in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  return 0
+}
+
+open_desktop() {
+  "$LSREGISTER" -f "$APP_PATH" 2>/dev/null || true
+  open -g "$APP_PATH" || log "could not relaunch Paseo Desktop"
+}
+
+# Paseo Desktop attaches to the launchd daemon instead of starting its own copy.
+disable_desktop_daemon_management() {
+  mkdir -p "$(dirname "$DESKTOP_SETTINGS")"
+  "$RUNTIME_NODE" -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const doc = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { version: 1 };
+    doc.settings ??= {};
+    doc.settings.daemon = { ...doc.settings.daemon, manageBuiltInDaemon: false };
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + "\n");' "$DESKTOP_SETTINGS"
+}
+
+install_desktop() {
+  local app="$1" backup old
+  [ -d "$app" ] || die "desktop build missing at $app"
+  mkdir -p "$FORK_ROOT/backups"
+  if [ -d "$APP_PATH" ]; then
+    backup="$FORK_ROOT/backups/Paseo-$(date +%Y%m%d-%H%M%S).app"
+    # Keep the original signed release once, for good.
+    if [ ! -e "$FORK_ROOT/backups/Paseo-upstream.app" ] &&
+      codesign -dv "$APP_PATH" 2>&1 | grep -q '^TeamIdentifier=99ZMJMKU9Y'; then
+      backup="$FORK_ROOT/backups/Paseo-upstream.app"
+    fi
+    mv "$APP_PATH" "$backup"
+  fi
+  ditto "$app" "$APP_PATH"
+  for old in $(ls -1dt "$FORK_ROOT"/backups/Paseo-2*.app 2>/dev/null | tail -n +3 || true); do
+    rm -rf "$old"
+  done
+  log "installed Paseo.app from $app"
+}
+
+write_plist() {
+  mkdir -p "$(dirname "$PLIST")"
+  cat >"$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$RUNTIME_NODE</string>
+    <string>$FORK_ROOT/current/scripts/fork/launch-daemon.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PASEO_FORK_ROOT</key><string>$FORK_ROOT</string>
+    <key>PASEO_HOME</key><string>$PASEO_HOME_DIR</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ExitTimeOut</key><integer>60</integer>
+  <key>StandardOutPath</key><string>$FORK_ROOT/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>$FORK_ROOT/logs/launchd.log</string>
+</dict>
+</plist>
+EOF
+}
+
+write_cli_shim() {
+  cat >"$FORK_ROOT/bin/paseo" <<EOF
+#!/bin/sh
+# Paseo CLI from the active personal-fork slot (see FORK.md).
+exec "$RUNTIME_NODE" --disable-warning=DEP0040 "$FORK_ROOT/current/packages/cli/dist/index.js" "\$@"
+EOF
+  chmod +x "$FORK_ROOT/bin/paseo"
+}
+
+# Repoints a `paseo` symlink that Paseo Desktop installed, so the CLI follows deploys.
+link_global_cli() {
+  local link
+  for link in /opt/homebrew/bin/paseo /usr/local/bin/paseo; do
+    case "$(readlink "$link" 2>/dev/null || true)" in
+      */Paseo.app/Contents/Resources/bin/paseo)
+        ln -sfh "$FORK_ROOT/bin/paseo" "$link"
+        log "pointed $link at the fork CLI"
+        ;;
+    esac
+  done
+}
+
+enable_web_ui_by_default() {
+  [ -f "$PASEO_HOME_DIR/config.json" ] || return 0
+  "$RUNTIME_NODE" -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (config.features?.webUi?.enabled !== undefined) process.exit(0);
+    config.features = { ...config.features, webUi: { ...config.features?.webUi, enabled: true } };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+    console.log("enabled the bundled web UI");' "$PASEO_HOME_DIR/config.json"
+}
+
+cmd_install() {
+  local name node_major upstream
+  [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || die "macOS on Apple Silicon only"
+  command -v git >/dev/null || die "git not found"
+  command -v npm >/dev/null || die "npm not found"
+  node_major="$(node -p 'process.versions.node.split(".")[0]')"
+  [ "$node_major" -ge 22 ] || die "node 22 or newer is required"
+  mkdir -p "$FORK_ROOT/slots" "$FORK_ROOT/bin" "$FORK_ROOT/runtime" "$FORK_ROOT/backups"
+  # A dedicated copy, so the Full Disk Access grant is scoped to the daemon and survives node upgrades.
+  if [ ! -x "$RUNTIME_NODE" ]; then
+    cp "$(node -p process.execPath)" "$RUNTIME_NODE"
+    log "pinned daemon runtime $RUNTIME_NODE ($("$RUNTIME_NODE" --version))"
+  fi
+  upstream="$(remote_for "$REPO" "$UPSTREAM_REPO")"
+  if [ -z "$upstream" ]; then git -C "$REPO" remote add upstream "https://github.com/$UPSTREAM_REPO.git"; fi
+  for name in a b; do
+    if [ ! -d "$(slot_dir "$name")" ]; then
+      git -C "$REPO" worktree add --detach "$(slot_dir "$name")" "$BRANCH"
+    fi
+  done
+  write_cli_shim
+  write_plist
+  enable_web_ui_by_default
+  cat <<EOF
+
+Installed under $FORK_ROOT. Next:
+  1. System Settings → Privacy & Security → Full Disk Access → + → add $RUNTIME_NODE
+     (in the file picker press Cmd+Shift+G and paste the path).
+  2. $SCRIPT_PATH deploy --desktop --now
+EOF
+}
+
+cmd_deploy() {
+  local desktop=0 delay=15 activate=1 ref="$BRANCH" sha target
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --desktop) desktop=1 ;;
+      --now) delay=0 ;;
+      --build-only) activate=0 ;;
+      -*) die "unknown option $1" ;;
+      *) ref="$1" ;;
+    esac
+    shift
+  done
+  [ -x "$RUNTIME_NODE" ] || die "run: paseo-fork install"
+  sha="$(git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}")" || die "unknown ref $ref"
+  take_lock
+  target="$(other_slot "$(active_slot)")"
+  log "deploy $(git -C "$REPO" log -1 --format='%h %s' "$sha") into slot $target"
+  build_slot "$target" "$sha" "$desktop"
+  if [ "$activate" = 0 ]; then
+    rm -f "$LOCK"
+    log "built slot $target; activate it with: paseo-fork switch"
+    return
+  fi
+  schedule_activation "$target" "$delay" "$desktop"
+}
+
+cmd_switch() {
+  local delay=15 desktop=0 target
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --now) delay=0 ;;
+      --desktop) desktop=1 ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  target="$(other_slot "$(active_slot)")"
+  [ -f "$FORK_ROOT/state/$target.built" ] || die "slot $target has no successful build to switch to"
+  take_lock
+  schedule_activation "$target" "$delay" "$desktop"
+}
+
+cmd_activate() {
+  local name="$1" delay="$2" desktop=0 relaunch=0 ok=0 dir previous_slot
+  if [ "${3:-}" = --desktop ]; then desktop=1; fi
+  echo $$ >"$LOCK"
+  trap 'rm -f "$LOCK"' EXIT
+  sleep "$delay"
+  dir="$(slot_dir "$name")"
+  previous_slot="$(active_slot)"
+  [ -f "$FORK_ROOT/state/$name.built" ] || die "slot $name has no successful build"
+  if ! launchctl print "$GUI/$LABEL" >/dev/null 2>&1; then
+    log "first activation: taking the daemon over from Paseo Desktop"
+    if quit_desktop; then relaunch=1; fi
+    stop_daemon "$dir" || die "could not stop the daemon Paseo Desktop started"
+    disable_desktop_daemon_management
+    link_global_cli
+  fi
+  if [ "$desktop" = 1 ]; then
+    if quit_desktop; then relaunch=1; fi
+    install_desktop "$(desktop_app_path "$dir")"
+  fi
+  ln -sfh "slots/$name" "$FORK_ROOT/current"
+  log "slot $name is current: $(describe_built "$name"); restarting the daemon"
+  if restart_daemon "$dir"; then
+    ok=1
+    log "deploy ok: slot $name is live"
+  else
+    log "error: slot $name failed its health check"
+    if [ "$previous_slot" != none ] && [ "$previous_slot" != "$name" ]; then
+      ln -sfh "slots/$previous_slot" "$FORK_ROOT/current"
+      log "rolling back to slot $previous_slot"
+      if restart_daemon "$(slot_dir "$previous_slot")"; then
+        log "rollback ok: slot $previous_slot is live"
+      else
+        log "error: slot $previous_slot is unhealthy too; see $PASEO_HOME_DIR/daemon.log and $FORK_ROOT/logs/launchd.log"
+      fi
+    fi
+  fi
+  if [ "$relaunch" = 1 ]; then open_desktop; fi
+  [ "$ok" = 1 ]
+}
+
+cmd_sync() {
+  local checkout upstream fork before
+  checkout="$(branch_checkout)"
+  [ -n "$checkout" ] || die "check out $BRANCH in a worktree first"
+  cd "$checkout"
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || die "commit or stash changes in $checkout first"
+  upstream="$(remote_for "$checkout" "$UPSTREAM_REPO")"
+  fork="$(remote_for "$checkout" "$FORK_REPO")"
+  [ -n "$upstream" ] && [ -n "$fork" ] || die "need git remotes for $UPSTREAM_REPO and $FORK_REPO"
+  git fetch --quiet "$upstream" main
+  before="$(git rev-parse HEAD)"
+  if ! git rebase "$upstream/main"; then
+    die "rebase stopped on a conflict in $checkout; resolve it and run 'git rebase --continue' (or 'git rebase --skip' for a patch upstream already merged), then: git push --force-with-lease $fork $BRANCH"
+  fi
+  log "rebased $BRANCH onto $upstream/main ($(git rev-parse --short "$before") → $(git rev-parse --short HEAD))"
+  git push --force-with-lease "$fork" "$BRANCH"
+}
+
+cmd_status() {
+  local name
+  echo "current slot: $(active_slot)"
+  for name in a b; do echo "slot $name: $(describe_built "$name")"; done
+  launchctl print "$GUI/$LABEL" 2>/dev/null | grep -E '^[[:space:]]+(state|pid|last exit code) =' ||
+    echo "launchd job $LABEL is not loaded"
+  echo "--- recent deploy log"
+  tail -n 10 "$DEPLOY_LOG" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  install | deploy | switch | sync | status | activate)
+    subcommand="$1"
+    shift
+    "cmd_$subcommand" "$@"
+    ;;
+  rollback)
+    shift
+    cmd_switch "$@"
+    ;;
+  *) usage ;;
+esac
