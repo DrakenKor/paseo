@@ -9,7 +9,8 @@ FORK_REPO="${PASEO_FORK_REPO:-DrakenKor/paseo}"
 UPSTREAM_REPO="getpaseo/paseo"
 LABEL="sh.paseo.fork.daemon"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-RUNTIME_NODE="$FORK_ROOT/runtime/node"
+RUNTIME_APP="$FORK_ROOT/runtime/Paseo Daemon.app"
+RUNTIME_NODE="$RUNTIME_APP/Contents/MacOS/paseo-daemon"
 APP_PATH="/Applications/Paseo.app"
 DESKTOP_SETTINGS="$HOME/Library/Application Support/Paseo/desktop-settings.json"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -294,6 +295,32 @@ write_plist() {
 EOF
 }
 
+# A dedicated node copy, so the Full Disk Access grant is scoped to the daemon and survives node
+# upgrades. The app wrapper gives it a name and icon in System Settings.
+write_runtime_app() {
+  local contents="$RUNTIME_APP/Contents"
+  mkdir -p "$contents/MacOS" "$contents/Resources"
+  cp "$(node -p process.execPath)" "$RUNTIME_NODE"
+  cp "$REPO/scripts/fork/icon.icns" "$contents/Resources/AppIcon.icns"
+  cat >"$contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>$LABEL</string>
+  <key>CFBundleName</key><string>Paseo Daemon</string>
+  <key>CFBundleDisplayName</key><string>Paseo Daemon</string>
+  <key>CFBundleExecutable</key><string>paseo-daemon</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSBackgroundOnly</key><true/>
+</dict>
+</plist>
+EOF
+  codesign --force --sign - "$RUNTIME_APP"
+  log "pinned daemon runtime $RUNTIME_APP (node $("$RUNTIME_NODE" --version))"
+}
+
 write_cli_shim() {
   cat >"$FORK_ROOT/bin/paseo" <<EOF
 #!/bin/sh
@@ -336,11 +363,7 @@ cmd_install() {
   node_major="$(node -p 'process.versions.node.split(".")[0]')"
   [ "$node_major" -ge 22 ] || die "node 22 or newer is required"
   mkdir -p "$FORK_ROOT/slots" "$FORK_ROOT/bin" "$FORK_ROOT/runtime" "$FORK_ROOT/backups"
-  # A dedicated copy, so the Full Disk Access grant is scoped to the daemon and survives node upgrades.
-  if [ ! -x "$RUNTIME_NODE" ]; then
-    cp "$(node -p process.execPath)" "$RUNTIME_NODE"
-    log "pinned daemon runtime $RUNTIME_NODE ($("$RUNTIME_NODE" --version))"
-  fi
+  [ -x "$RUNTIME_NODE" ] || write_runtime_app
   upstream="$(remote_for "$REPO" "$UPSTREAM_REPO")"
   if [ -z "$upstream" ]; then git -C "$REPO" remote add upstream "https://github.com/$UPSTREAM_REPO.git"; fi
   for name in a b; do
@@ -354,7 +377,7 @@ cmd_install() {
   cat <<EOF
 
 Installed under $FORK_ROOT. Next:
-  1. System Settings → Privacy & Security → Full Disk Access → + → add $RUNTIME_NODE
+  1. System Settings → Privacy & Security → Full Disk Access → + → add $RUNTIME_APP
      (in the file picker press Cmd+Shift+G and paste the path).
   2. $SCRIPT_PATH deploy --desktop --now
 EOF

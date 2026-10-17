@@ -1,6 +1,6 @@
 // launchd entry for the personal-fork daemon (see FORK.md).
 //
-// Runs this slot's supervisor in-process so the launchd job is a single, stable `node` binary:
+// Runs this slot's supervisor in-process so the launchd job is a single, stable runtime binary:
 // macOS privacy grants (Full Disk Access) attach to that binary, so deploys never re-prompt.
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";

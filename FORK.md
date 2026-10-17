@@ -12,11 +12,12 @@ repo docs that forbid restarting the daemon: deploy with `scripts/fork/paseo-for
 | `~/Documents/Repo/paseo` on `personal`              | Where you edit and commit                                          |
 | `~/.paseo-fork/slots/a`, `slots/b`                  | Build slots (git worktrees). The daemon runs from one. Never edit. |
 | `~/.paseo-fork/current`                             | Symlink to the live slot                                           |
-| `~/.paseo-fork/runtime/node`                        | Pinned daemon runtime; holds the Full Disk Access grant            |
+| `~/.paseo-fork/runtime/Paseo Daemon.app`            | Pinned node runtime; holds the Full Disk Access grant              |
 | `~/.paseo-fork/bin/paseo`                           | CLI from the live slot; the `paseo` on PATH points here            |
 | `~/.paseo-fork/logs/`                               | `deploy.log`, `build-<slot>.log`, `launchd.log`                    |
 | `~/Library/LaunchAgents/sh.paseo.fork.daemon.plist` | Starts the daemon at login and after a crash                       |
 | `/Applications/Paseo.app`                           | Fork desktop build; attaches to the daemon, never starts its own   |
+| `scripts/fork/icon.svg`, `icon.icns`                | Fork icon for Paseo.app and Paseo Daemon.app                       |
 
 Daemon state, pairings, and settings stay in `~/.paseo`.
 
@@ -68,7 +69,7 @@ Requires Apple Silicon, git, node 22 or newer, and the Xcode Command Line Tools.
 ```bash
 git clone -b personal https://github.com/DrakenKor/paseo.git ~/Documents/Repo/paseo
 cd ~/Documents/Repo/paseo && scripts/fork/paseo-fork install
-# Grant Full Disk Access to ~/.paseo-fork/runtime/node, as install prints.
+# Grant Full Disk Access to ~/.paseo-fork/runtime/Paseo Daemon.app, as install prints.
 scripts/fork/paseo-fork deploy --desktop --now
 ```
 
@@ -78,8 +79,8 @@ app to attach mode.
 ## Why it is shaped this way
 
 - **No unattended prompts.** A launchd job's file access belongs to its own binary, and an
-  ungranted binary blocks on the "access Documents" prompt. The pinned `runtime/node` is granted
-  once and never changes during deploys. The desktop build runs with `--use-mock-keychain`, since
+  ungranted binary blocks on the "access Documents" prompt. The pinned runtime is granted once and
+  never changes during deploys. The desktop build runs with `--use-mock-keychain`, since
   each ad-hoc rebuild would otherwise prompt for the login password at launch.
 - **Two slots.** A build never touches the running code, and rollback is a symlink flip.
 - **Detached activation.** The restart kills every agent process, including the one deploying, so

@@ -1,6 +1,7 @@
 # Personal-fork desktop build (see FORK.md). `paseo-fork deploy --desktop` ad-hoc signs the result.
 extends: ./electron-builder.yml
 mac:
+  icon: ../../scripts/fork/icon.icns
   identity: null
   notarize: false
   hardenedRuntime: false
