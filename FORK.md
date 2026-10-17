@@ -1,7 +1,7 @@
 # Personal fork
 
 `personal` on [DrakenKor/paseo](https://github.com/DrakenKor/paseo) is upstream `getpaseo/paseo`
-`main` plus local patch commits. It runs as the everyday Paseo on Manav's Macs. This file overrides
+`main` plus local patch commits. It runs as the everyday Paseo on these Macs. This file overrides
 repo docs that forbid restarting the daemon: deploy with `scripts/fork/paseo-fork`, never with
 `paseo daemon restart`, `paseo daemon stop`, or `launchctl`.
 
@@ -45,7 +45,7 @@ much longer and relaunches the desktop app.
 | `packages/desktop`                                      | The desktop app with `--desktop`                                                      |
 
 The App Store iOS app never gets fork changes to `packages/app`. Check app fixes from the phone in
-Safari at `http://work.berylline-corn.ts.net:6767/` (Tailscale).
+Safari at `http://<mac>.<tailnet>.ts.net:6767/`, the Mac's Tailscale name.
 
 ## Upstream fixes
 
