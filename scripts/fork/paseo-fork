@@ -223,10 +223,16 @@ quit_desktop() {
   log "quitting Paseo Desktop (pid $pid)"
   kill -TERM "$pid"
   for attempt in $(seq 1 30); do
-    kill -0 "$pid" 2>/dev/null || return 0
+    kill -0 "$pid" 2>/dev/null || break
     sleep 1
   done
   kill -KILL "$pid" 2>/dev/null || true
+  # An upstream build installs its staged update once it quits; let that finish before touching the app.
+  sleep 2
+  for attempt in $(seq 1 60); do
+    pgrep -f sh.paseo.desktop.ShipIt >/dev/null || break
+    sleep 1
+  done
   return 0
 }
 
@@ -255,7 +261,7 @@ install_desktop() {
     backup="$FORK_ROOT/backups/Paseo-$(date +%Y%m%d-%H%M%S).app"
     # Keep the original signed release once, for good.
     if [ ! -e "$FORK_ROOT/backups/Paseo-upstream.app" ] &&
-      codesign -dv "$APP_PATH" 2>&1 | grep -q '^TeamIdentifier=99ZMJMKU9Y'; then
+      [[ "$(codesign -dv "$APP_PATH" 2>&1)" == *"TeamIdentifier=99ZMJMKU9Y"* ]]; then
       backup="$FORK_ROOT/backups/Paseo-upstream.app"
     fi
     mv "$APP_PATH" "$backup"
@@ -343,6 +349,33 @@ link_global_cli() {
   done
 }
 
+# Binds the daemon to this Mac's Tailscale address only, with the internet relay off, so it is
+# reachable from the tailnet and nowhere else.
+listen_on_tailnet() {
+  local tailscale ip dns
+  tailscale="$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)"
+  ip="$("$tailscale" ip -4 2>/dev/null | head -n 1 || true)"
+  if [ -z "$ip" ]; then
+    log "warning: Tailscale is not running; set daemon.listen in $PASEO_HOME_DIR/config.json to this Mac's Tailscale IP and port 6767"
+    return 0
+  fi
+  dns="$("$tailscale" status --json 2>/dev/null |
+    "$RUNTIME_NODE" -e 'let s = ""; process.stdin.on("data", (c) => (s += c)).on("end", () =>
+      process.stdout.write(JSON.parse(s).Self.DNSName.replace(/\.$/, "")))' || true)"
+  "$RUNTIME_NODE" -e '
+    const fs = require("fs");
+    const [file, ip, dns] = process.argv.slice(1);
+    const config = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { version: 1 };
+    const daemon = (config.daemon ??= {});
+    daemon.listen = `${ip}:6767`;
+    daemon.relay = { ...daemon.relay, enabled: false };
+    const names = dns ? [dns.split(".")[0], dns] : [];
+    daemon.hostnames = [...new Set([...(daemon.hostnames ?? ["localhost", ".localhost"]), ...names])];
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+    console.log(`daemon listens on ${daemon.listen} (tailnet only), relay off`);' \
+    "$PASEO_HOME_DIR/config.json" "$ip" "$dns"
+}
+
 enable_web_ui_by_default() {
   [ -f "$PASEO_HOME_DIR/config.json" ] || return 0
   "$RUNTIME_NODE" -e '
@@ -373,6 +406,8 @@ cmd_install() {
   done
   write_cli_shim
   write_plist
+  mkdir -p "$PASEO_HOME_DIR"
+  listen_on_tailnet
   enable_web_ui_by_default
   cat <<EOF
 

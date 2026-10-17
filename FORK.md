@@ -82,6 +82,9 @@ app to attach mode.
   ungranted binary blocks on the "access Documents" prompt. The pinned runtime is granted once and
   never changes during deploys. The desktop build runs with `--use-mock-keychain`, since
   each ad-hoc rebuild would otherwise prompt for the login password at launch.
+- **Tailnet only.** `install` binds the daemon to the Mac's Tailscale address and turns the relay
+  off. The setting lives in `~/.paseo/config.json`, and the launchd entry drops `PASEO_*` shell
+  exports, so nothing overrides it.
 - **Two slots.** A build never touches the running code, and rollback is a symlink flip.
 - **Detached activation.** The restart kills every agent process, including the one deploying, so
   `deploy` hands the switch to a process in its own session.
